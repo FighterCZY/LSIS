@@ -1,0 +1,1017 @@
+
+<!-- saved from url=(0072)http://edu-cornell-cs-cs5300s14-project1.s3.amazonaws.com/project1b.html -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">
+  
+	<meta name="author" content="Alan Demers">
+	<meta name="publisher" content="Alan Demers">
+	<meta name="description" content="CS 5300: Project 1b">
+	<title>CS 5300: Project 1b: Scalable and Available Website</title>
+<style type="text/css"></style></head>
+
+<body>
+
+<table border="0" cellspacing="0" cellpadding="0" width="750">
+<tbody><tr>
+<td align="left"><h4>CS5300 S14</h4></td>
+<td align="center"><h4>TR 11:40-12:55</h4></td>
+<td align="right"><h4>Olin 255</h4></td>
+</tr>
+</tbody></table>
+
+<table border="0" cellspacing="0" cellpadding="0" width="750">
+<tbody><tr>
+<td align="left">
+<a href="http://www.cs.cornell.edu/Courses/cs5300/2013sp"><img align="center" src="./CS 5300  Project 1b  Scalable and Available Website_files/cornell-logo.gif"></a>
+</td>
+<td>
+<h2>
+Project 1b: Scalability and Fault-Tolerance
+</h2>
+</td>
+</tr>
+</tbody></table>
+
+<table border="0" cellspacing="0" cellpadding="0" width="750">
+<tbody><tr><td>&nbsp;<br>&nbsp;</td></tr>
+</tbody></table>
+
+<table border="0" cellspacing="0" cellpadding="0" width="700">
+<tbody><tr>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;</td>
+<td>
+
+<!-- BEGIN PAGE CONTENT -->
+
+
+<h3>1. Introduction</h3>
+<p>
+This is the second half of CS5300 Project 1.
+It will use
+<a href="http://aws.amazon.com/elasticbeanstalk/">AWS Elastic Beanstalk</a>
+(documented <a href="http://aws.amazon.com/documentation/elasticbeanstalk/">here</a>)
+together with UDP networking,
+to build a distributed, scalable and fault-tolerant version
+of the website you built as Project 1a.
+AWS Elastic Beanstalk will be used to create and maintain a load-balanced
+set of Application Servers
+running <a href="http://tomcat.apache.org/">Apache Tomcat Version 7</a>.
+The servers will run Java Servlet (and/or JSP) code implementing your site,
+together with additional Java code
+implementing a distributed, fault-tolerant,
+in-memory session state database
+similar to SSM.
+</p><p>
+Recall that this project is for <b>groups of 3 or 4 persons</b>.
+For 4-person groups the “extra credit” feature
+described in <b>Section 5</b> is mandatory.
+<!-- TODO: fill in the sections -->
+
+</p><h3>2. Preliminaries</h3>
+<p>
+<!-- TODO: <blockquote><b>You need to set the region before you can find your keypairs</b></blockquote> -->
+For Project 1a you downloaded and installed
+<a href="http://tomcat.apache.org/">Apache Tomcat Version 7</a>
+on your own machine, and used it to develop Servlets and/or JSPs.
+For Project 1b your Web application will run in the AWS Cloud.
+It will be managed by
+<a href="http://aws.amazon.com/documentation/elasticbeanstalk/">AWS Elastic Beanstalk</a>
+and your code will keep track of appproximate group membership in an
+<a href="http://aws.amazon.com/documentation/simpledb/">AWS SimpleDB</a> database.
+
+The “getting started guides” at Amazon
+will tell you how to sign up for the AWS services you need.
+</p><p>
+For this project you should download and install the
+<a href="http://aws.amazon.com/eclipse">AWS Toolkit for Eclipse</a>
+if you haven’t already done so.
+This includes the <a href="http://aws.amazon.com/sdkforjava/">AWS SDK for Java</a>,
+documented <a href="http://docs.aws.amazon.com/AWSJavaSDK/latest/javadoc/index.html">here</a>,
+which includes client stubs that Java code can use to access many AWS services
+(and includes many useful code examples as well).
+</p><p>
+You can also use the
+<a href="https://console.aws.amazon.com/s3/home">AWS Management Console</a>
+to deploy and control your website under Elastic Beanstalk.
+
+</p><h3>3. Architecture</h3>
+<p>
+Your Project 1a solution had one or more Servlets or JSPs
+to handle requests;
+it also had an in-memory session data table
+(the “SessTbl”, probably a HashTable or HashMap)
+with some mechanism for garbage-collecting expired entries.
+You are now going to expand Project 1a to a distributed system.
+The system will have a load balancer (provided by Amazon Elastic Beanstalk),
+and two or more identical server nodes (with Apache Tomcat 7
+running Java code that you provide).
+These components will cooperate to implement a 1-resilient distributed website.
+You will write the server code, consisting of:
+</p><ul>
+<li>Servlets/JSPs for processing client requests --
+essentially the code from Project 1a.
+</li><li>A distributed session state database analogous to SSM:
+each server node will have a local in-memory session data
+table (“SessTbl” for short)
+exposed through a Remote Procedure Call server interface
+to be discussed in Section 3.9 below,
+and each server will have a client RPC “stub”
+to access the SessTbls of other server nodes.
+</li><li>A gossip-based approximate group membership service, so every server knows
+the address of sufficiently many other servers to maintain 1-resilience.
+</li></ul>
+
+<h4>3.1 Server Identifiers, Session Identifiers and Session Cookies</h4>
+<p>
+<b>Server IDs.</b>
+Each server will be identified by a value we will call a SvrID.
+Suppose the HTTP TCP port and the RPC UDP port (to be discussed below)
+are the same for every server and are globally known.
+Then a SvrID can just be the server’s IP adddress.
+<!-- AJD: this is spurious: (Depending on your design and debugging strategy,
+you might want to extend this to include the port numbers explicitly
+in a SvrID, making it possible to run multiple servers on the same machine.
+This could be helpful for debugging.
+But since this is a group project, you presumably have more than one machine
+available anyway, so including the ports in an SvrID is probably not worth the effort.) -->
+</p><p>
+In the discussion below we shall often abuse notation by using a term like
+“SvrID<sub>foo</sub>” to denote either a SvrID or the server itself;
+for example,
+</p><blockquote>
+SvrID<sub>local</sub> sends a message to SviID<sub>primary</sub>.
+</blockquote>
+The intended meaning should be clear from context.
+<p>
+There is a distinguished “null” server ID that identifies no server.
+This is denoted SvrID<sub>NULL</sub>;
+internally it can be represented by an IP address of all zeroes.
+Your protocols need to check for SvrID<sub>NULL</sub> and treat it specially in some cases;
+for example, it makes no sense to send a message to SvrID<sub>NULL</sub>.
+</p><p>
+<b>Getting Your Own IP Address / SvrID.</b>
+This is surprisingly difficult.
+During development, when you are testing your code in a Tomcat server
+running on your own machine rather than on an EC2 instance,
+you will want the real IP address of your machine, probably <i>not</i>
+the “localhost” address 127.0.0.1.
+You can Google how to get your machine’s IP address from Java;
+as is often the case, a reasonable discussion can be found
+at <a href="http://stackoverflow.com/questions/8083479/java-getting-my-ip-address">StackOverflow</a>.
+Unfortunately, because of the unique Amazon networking environment,
+the same technique <i>will not work</i> to enable a server
+running on an EC2 instance to determine its own IP address.
+</p><p>
+Here is one (admittedly baroque) approach to getting the IP address
+or other instance metadata of an EC2 instance from code running on that instance.
+The <a href="http://aws.amazon.com/code/1825">EC2 Instance Metadata Query Tool</a>
+is automatically installed as
+</p><blockquote>/opt/aws/bin/ec2-metadata</blockquote>
+on the EC2 instances created for you by Elastic Beanstalk.
+So for example running the shell command
+<blockquote>/opt/aws/bin/ec2-metadata --public-ipv4</blockquote>
+on such an instance would print
+<blockquote>public-ipv4: ww.xx.yy.zz</blockquote>
+on the standard output.
+Java code running in your Tomcat server
+can actually execute this command and examine the output, 
+by using <code>Runtime.exec()</code> to execute the command and capturing the
+command output in a Java String.
+A fairly complete discussion of this,
+which has been tested recently,
+can be found <a href="http://www.javaworld.com/article/2071275/core-java/when-runtime-exec---won-t.html">here</a>.
+The <code>ec2-metadata</code> script actually issues an HTTP request to the EC2 infrastructure,
+so it’s quite expensive.
+Thus, you should call it only once and cache the result.
+<p>
+<b>Session IDs.</b>
+In your system, each server will need the ability to generate a
+globally unique session ID.
+As we discussed briefly in lecture, this can be done by including a SvrID
+as part of the session ID;
+that is, a session ID can be a pair
+</p><blockquote>SessID &nbsp; = &nbsp; &lt; <i>sess_num</i>, SvrID &gt;</blockquote>
+where SvrID identifies the server that originally created the session ID,
+and <i>sess_num</i> is the value of a global variable in that server
+that is incremented each time a new session ID is created there.
+With multiple servers, the <i>sess_num</i> values will not be globally unique;
+but the SessIDs, which include the server’s unique SvrID, will be globally unique as required.
+<p>
+A Session Version Number is just a number that is incremented
+for every request within a session; it uniquely identifies a version of a given session’s data.
+</p><p>
+<b>Session Cookies.</b>
+As in Project 1a,
+a <code>CS5300PROJ1SESSION</code> cookie will be sent with each client request in an existing session.
+It must contain the SessID and Session Version Number.
+In addition, because you are implementing a distributed session state data base,
+you will need to put some “location metadata” into your session cookies.
+For a 1-resilient system, the metadata will consist of a pair of SvrIDs
+identifying the “primary” and “backup”
+locations that hold the session state data:
+</p><blockquote>&lt; SvrID<sub>primary</sub>, SvrID<sub>backup</sub> &gt;</blockquote>
+<p>
+Thus, a request in an existing session
+will include a <code>CS5300PROJ1SESSION</code> cookie
+whose value contains the SessID, version and location metadata:
+</p><blockquote>
+&lt; SessID, <i>version</i>, &lt; SvrID<sub>primary</sub>, SvrID<sub>backup</sub> &gt; &gt;
+</blockquote>
+This tuple-of-tuples must be encoded as a string for transmission as a cookie value.
+As in Project 1a,
+you can “canonicalize” the tuples or just restrict them to
+“safe” characters
+(letters, digits, “.-_” are all safe).
+For example, if you use underscore characters to separate fields 
+the string value of a cookie might look like
+<blockquote>
+2_192.168.1.2_8_192.168.1.2_192.168.1.3
+</blockquote>
+This would represent an instance
+of the second session created at server 192.168.1.2,
+session version number 8,
+currently stored at servers 192.168.1.2 and 192.168.1.3.
+<p>
+The session’s expiration time
+is determined by the <code>MaxAge</code> parameter of the session cookie,
+so it doesn’t need to be stored explicitly in the cookie value.
+</p><p>
+Because the session expiration time and version change with every client request,
+every response needs to include a new cookie with the <code>MaxAge</code>
+and session version number set appropriately.
+</p><p>
+Just as in Project 1a,
+a client request arriving at your home page without a <code>CS5300PROJ1SESSION</code> cookie
+will cause a new session to be created.
+This is discussed in Section 3.5 below.
+
+</p><h4>3.2 Remote Procedure Call (RPC) Communication</h4>
+<p>
+Your distributed session state database will consist of multiple server instances
+that communicate with one another using a simple Remote Procedure Call (RPC) mechanism
+that you will implement.
+For simplicity, you should do your network communication using the User Datagram Protocol (UDP),
+which has some nice features for a project like this.
+The appropriate Java classes for UDP are
+<a href="http://docs.oracle.com/javase/6/docs/api/java/net/DatagramSocket.html">DatagramSocket</a>
+and <a href="http://docs.oracle.com/javase/6/docs/api/java/net/DatagramPacket.html">DatagramPacket</a>.
+Your RPC servers should all listen at the same well-known port number;
+port 5300 would be a good choice.
+</p><p>
+UDP is an unreliable packet-oriented protocol
+(in contrast to TCP, which provides <i>reliable byte streams</i>).
+The basic primitivies of UDP are
+</p><ul>
+<li>Send a packet to a specified IP adddress and port;
+</li><li>Receive a packet (<i>any</i> packet) sent to my own IP address and a specified port.
+</li></ul>
+This project has a 512-byte maximum length for session data
+(inherited from the specification of Project 1a).
+This maximum length ensures that any procedure call or reply message
+you need to send
+will fit in a single UDP packet.
+You should truncate session data values received from a client
+if they exceed this maximum length.
+Your RPC messages may be lost or reordered, but they will not be truncated,
+and you may assume they will not be corrupted either.
+UDP has a simple receive timeout mechanism --
+see the <code>setSoTimeout(int msec)</code>
+method of <a href="http://docs.oracle.com/javase/6/docs/api/java/net/DatagramSocket.html">DatagramSocket</a>
+for a description of this mechanism.
+You can use receive timeouts to decide that another machine is not responding.
+<b>You are not expected to implement retries of lost RPC messages</b> --
+in fact, this is discouraged.
+<p>
+An RPC protocol is basically just an agreed-upon format for call and reply messages.
+For example, a call message could consist of
+</p><ul>
+<li>a unique <i>callID</i> for the call.
+</li><li>an <i>operation code</i>.
+</li><li>zero or more <i>arguments</i>,
+whose format is determined by the operation code.
+</li></ul>
+A reply message could consist of
+<ul>
+<li>the <i>callID</i> of the call to which this is a reply.
+</li><li>zero or more <i>results</i>,
+whose format is determined by the operation code in the call.
+</li></ul>
+You <i>could</i> encode these messages using Java’s
+<code>Serializable</code> mechanism, but this is probably overkill for a simple system
+that exchanges only tuples of scalar values (i.e., no cyclic structures);
+so use of Serialization is definitely <i>not</i> required.
+You can easily encode the messages as fixed or variable length strings.
+Unlike cookie values, UDP packets do not need to be “canonicalized.”
+<p>
+The purpose of the callID is to enable you to ignore
+received packets that are not valid replies to the current call
+(e.g. packets that are delayed replies to previous calls).
+So if you send the same call to several servers concurrently,
+(as in the original SSM protocol discussed in class),
+the requests could all use the same callID;
+but the callIDs of logically different calls must be different.
+Note this does not require that the callID be a globally unique value.
+It is sufficient for each server maintain a counter that is incremented every time
+the server performs a remote call.
+</p><p>
+Your protocol may exploit RPC parallelism, sending a number of requests
+to different servers, then waiting for the first (or the first few) responses
+and discarding any remaining responses.
+Doing this efficiently requires the ability for a thread to wait for multiple incoming messages at once.
+You can't just wait for the individual responses in the order in which the requests were sent,
+since there is no reason to expect them to arrive in that order.
+Indeed, some responses might not arrive at all, due to a dropped UDP packet
+or a failed server.
+Waiting for multiple responses
+is a difficult trick with TCP -- it requires multiple TCP connections
+and lots of threads and synchronization,
+or use of the complicated Java NIO mechanism.
+But with UDP it is quite easy, since a single UDP DatagramSocket is capable of
+receiving data from multiple senders.
+</p><p>
+<b>3.2.1 RPC Clients</b>
+</p><p>
+Here is pseudocode of the RPC client stub for a <code>SessionRead(...)</code> call
+(described in Sections 3.3 and 3.11 below).
+A <code>SessionRead(...)</code> call may be sent to one or more destinations,
+but only the first response is significant.
+</p><pre>  //
+  // SessionReadClient(sessionID, sessionVersionNum)
+  //   sending to multiple [destAddr, destPort] pairs
+  //   using a single pre-existing DatagramSocket object rpcSocket
+  //
+  callID = generate unique id for call
+  byte[] outBuf = new byte[...];
+  fill outBuf with [ callID, operationSESSIONREAD, sessionID, sessionVersionNum ]
+  for( each destAddr, destPort ) {
+    DatagramPacket sendPkt = new DatagramPacket(outBuf, length, destAddr, destPort)
+    rpcSocket.send(sendPkt);
+  }
+  byte [] inBuf = new byte[maxPacketSize];
+  DatagramPacket recvPkt = new DatagramPacket(inBuf, inBuf.length);
+  try {
+    do {
+      recvPkt.setLength(inBuf.length);
+      rpcSocket.receive(recvPkt);
+    } while( the callID in inBuf is not the expected one );
+  } catch(InterruptedIOException iioe) {
+    // timeout 
+    recvPkt = null;
+  } catch(IOException ioe) {
+    // other error 
+    ...
+  }
+  return recvPkt;
+</pre>
+Note we have left out some exception handling (<code>try ... catch</code> blocks).
+Also, a “real” implementation might want to retry the <code>receive</code> operation
+after an IOException other than timeout.
+<p>
+Now consider thread synchronization.
+Suppose two or more threads try to execute the above RPC code concurrently
+<i>using the same rpcSocket</i>.
+Technically, DatagramSocket is thread-safe; but when multiple threads read
+from the same DatagramSocket, each incoming packet is delivered to exactly one of
+the reading threads, chosen by the OS at random
+(or at least chosen in a way we can't possibly predict).
+Thus, each calling thread would be likely to receive (and discard)
+some of the other thread’s reply packets.
+This would be a Bad Thing.
+Fortunately, there is a simple solution: create a new DatagramSocket object
+for each call, and close it at the end of the call.
+The above code becomes
+</p><pre>  //
+  // SessionRead(sessionID, sessionVersionNum)
+  //   sending to multiple [destAddr, destPort] pairs
+  //   creating new DatagramSocket object rpcSocket
+  //   and closing it when done
+  //
+  DatagramSocket rpcSocket = new DatagramSocket();
+  callID = generate unique id for call
+  ... (same as before)
+  rpcSocket.close();
+  return recvPkt;
+</pre>
+This ensures that all concurrent outgoing RPCs use different <code>DatagramSocket</code> objects.
+The zero-argument constructor for <code>DatagramSocket</code>
+gives the new socket an arbitrary, currently unused port number.
+This is fine -- nothing in the RPC protocol depends on the client port number;
+the server simply sends the response to whatever port the client used
+when it sent the request.
+The client’s port (and IP address) can be obtained from the received DatagramPacket.
+When the client has received “enough” responses,
+it closes the socket.
+UDP packets sent to a socket that has been closed
+are automatically discarded by the OS.
+<p>
+<b>3.2.2 RPC Servers</b>
+</p><p>
+A useful UDP-based RPC server can be just a single thread
+in a loop.
+Each time around the loop it receives from a single DatagramSocket,
+computes a response, and sends a reply using the same DatagramSocket.
+The pseudocode looks something like this:
+</p><pre>  DatagramSocket rpcSocket = new DatagramSocket(portPROJ1BRPC);
+  serverPort = rpcSocket.getLocalPort();
+  ...
+  while(true) {
+    byte[] inBuf = new byte[...]
+    DatagramPacket recvPkt = new DatagramPacket(inBuf, inBuf.length);
+    rpcSocket.receive(recvPkt);
+    InetAddress returnAddr = recvPkt.getAddress();
+    int returnPort = recvPkt.getPort();
+    // here inBuf contains the callID and operationCode
+    int operationCode = ... // get requested operationCode
+    byte[] outBuf = NULL;
+    switch( operationCode ) {
+    	...
+    	case operationSESSIONREAD:
+    		// SessionRead accepts call args and returns call results 
+    		outBuf = SessionRead(recvPkt.getdata(), recvPkt.getLength());
+    		break;
+    	...
+    }
+    // here outBuf should contain the callID and results of the call
+    DatagramPacket sendPkt = new DatagramPacket(outBuf, outBuf.length,
+    	returnAddr, returnPort);
+    rpcSocket.send(sendPkt);
+  }
+</pre>
+Again we have left out some distracting <code>try ... catch</code> blocks,
+but the intended behavior should be clear.
+<p>
+Here <code>rpcSocket</code> is created using the one-argument constructor
+that accepts an explicit port number; the port is the well known port
+used for your RPC servers; 5300 might be a good choice.
+
+</p><h4>3.3 Retrieving Session State</h4>
+When a user clicks one of your website’s buttons, a request is sent
+through the AWS Elastic Beanstalk load balancer,
+and is routed to one of your servers.
+Unless it is the first request in a new session,
+or its session has timed out,
+the request will include a <code>CS5300PROJ1SESSION</code> cookie as discussed above:
+<blockquote>
+&lt; SessID, <i>version</i>, &lt; SvrID<sub>primary</sub>, SvrID<sub>backup</sub> &gt; &gt;
+</blockquote>
+If either SvrID<sub>primary</sub> or SvrID<sub>backup</sub> is the receiving server’s own SvrID
+(call that “SvrID<sub>local</sub>”),
+then the requested session state is in the server’s local SessTbl and
+should be retrieved directly from there with no network traffic.
+Otherwise, there are two options:
+<blockquote>
+<p><b>Option 1.</b> Send a
+</p><blockquote>SessionRead( SessID, version )</blockquote>
+RPC request to SvrID<sub>primary</sub> and wait for a successful response.
+If the response times out or fails (i.e., returns “not found”), send another
+<blockquote>SessionRead( SessID, version )</blockquote>
+request to SvrID<sub>backup</sub> and wait for a successful response.
+This approach minimizes network traffic at the expense of possibly higher latency,
+especially in the (infrequent) case that SvrID<sub>primary</sub> has failed.
+<p><b>Option 2.</b> Send two
+</p><blockquote>SessionRead( SessID, version )</blockquote>
+RPC requests concurrently to SvrID<sub>primary</sub> and SvrID<sub>backup</sub>,
+wait for the first successful response, and discard the other response (if any).
+This approach minimizes latency but generates some unnecessary network traffic.
+</blockquote>
+<p>
+Using either approach,
+a successful response will contain the requested session data.
+However, you may be unable to elicit a successful reponse,
+possibly because the requested session has timed out,
+or because both the primary and backup servers have failed.
+In that case you should return an HTML page with a message saying
+the session timed out or failed
+(you will be able to tell the difference between these in some but possibly not all cases),
+and make sure the cookie for the timed-out-or-lost session is deleted from the browser.
+
+</p><h4>3.4 Storing Session State</h4>
+<p>
+<b>The Normal Case.</b>
+To process a client request,
+a server performs some request-specific computation,
+which may involve updates to the data layer
+as well as computing a new session state data value.
+We assume the updates to the data layer are done in
+(a sequence of) atomic transactions,
+each of which leaves the system in a consistent state.
+Logically this should be followed by an atomic update
+of the session state to its next version,
+and finally returning a successful result
+(HTML page and updated session cookie)
+to the client.
+</p><p>
+Assume a client request arrives at server SvrID<sub>local</sub> with the usual session cookie
+</p><blockquote>
+&lt; SessID, version, &lt; SvrID<sub>primary</sub>, SvrID<sub>backup</sub> &gt; &gt;
+</blockquote>
+and we reach the point of storing the updated session state and returning.
+<p>
+The new session state version is just
+</p><blockquote>
+new_version &nbsp;= &nbsp; version + 1.
+</blockquote>
+<p>
+To maintain 1-resilience, the new session state must be stored in
+the SessTbl of at least two servers.
+</p><p>
+To minimize network traffic, the primary site for the new session state
+can be SvrID<sub>local</sub> itself.
+So SvrID<sub>local</sub> stores a copy of the new session state into its own SessTbl.
+</p><p>
+The new backup site can be any other site that is “known” by SvrID<sub>local</sub>
+(that is, in the local server’s “view” -- see Sections 3.8 below).
+So SvrID<sub>local</sub> chooses a new backup site SvrID<sub>new_backup</sub>
+and sends a
+</p><blockquote>
+SessionWrite( SessID, new_version, new_data, discard_time )
+</blockquote>
+RPC to SvrID<sub>new_backup</sub>.
+How to compute the <i>discard_time</i> will be discussed in Section 3.6.
+After sending this request, SvrID<sub>local</sub> <i>must wait</i> for a successful response.
+If the response times out,
+SvrID<sub>local</sub> chooses a different new backup server and retries the call.
+If it eventually manages to elicit a successful response, it constructs the new session cookie
+<blockquote>
+&lt; SessID, new_version, &lt; SvrID<sub>local</sub>, SvrID<sub>new_backup</sub> &gt; &gt;
+</blockquote>
+and returns the result (HTML page with the new session cookie) to the client.
+If no new_backup can be found,
+SvrID<sub>NULL</sub> can be used in place of the backup location,
+so the new session cookie is
+<blockquote>
+&lt; SessID, new_version, &lt; SvrID<sub>local</sub>, SvrID<sub>NULL</sub> &gt; &gt;
+</blockquote>
+That is, the session is <i>non-replicated</i>.
+In this case the system is not 1-resilient,
+at least for the given session,
+but if there are no further failures the system will continue to operate correctly.
+<p>
+Because the above process is supposed to persist until it finds a backup site that is alive,
+it is not absolutely necessary to choose <i>new_backup</i> at random each time.
+To avoid having “obsolete” copies of (old versions of) a session
+cluttering up your SessTbls,
+you might first try whichever of SvrID<sub>primary</sub> and SvrID<sub>backup</sub>
+is not equal to SvrID<sub>local</sub> as your new backup.
+That way, the new version of the session data will replace the old version in the SessTbl.
+See Section 3.7 on Garbage Collection.
+ 
+</p><h4>3.5 Creating New Sessions</h4>
+<p>
+A client request arriving at  your home page without a <code>CS5300PROJ1SESSION</code> cookie
+must cause a new session to be created.
+The executing server SvrID<sub>local</sub> constructs a new SessID value
+by incrementing its global <i>sess_num</i> variable and constructing
+</p><blockquote>
+SessID &nbsp; = &nbsp; &lt; <i>sess_num</i>, SvrID<sub>local</sub> &gt;
+</blockquote>
+It then uses the procedure described in Section 3.4
+above to store the new session data at two locations.
+<p>
+<b>Newly Booted Servers.</b>
+A newly-booted server does not yet “know about”
+any servers other than itself.
+The server should immediately try to initialize its “membership view”
+from the global “Bootstrap View” as described in Section 3.8 below.
+If the server receives a new-session client request
+(a client request without a session cookie)
+before it has initialized its view,
+the server will be unable to store two copies of the new session data,
+so 1-resilience will not be guaranteed.
+You might be tempted to return an error in this case,
+or wait until the view becomes nonempty.
+However, such a policy would prevent you from running and debugging a system
+configuration that had only a single server instance.
+Since that is a <i>very</i> convenient thing to do,
+you should just create a non-replicated session cookie in this case.
+
+</p><h4>3.6 Implementing Session Timeouts</h4>
+<p>
+Inactive sessions time out,
+and the data for a timed-out session must eventually be “garbage collected”
+from all the servers.
+</p><p>
+Assume there is a global constant <code>SESSION_TIMEOUT_SECS</code>,
+which you can think of as the <i>minimum</i> amount of time a session is required
+to remain accessible after the last client request.
+The system should make the following guarantee: if a client issues a request in session <i>s</i>,
+then waits for an interval strictly less than <code>SESSION_TIMEOUT_SECS</code>,
+then issues another request in session <i>s</i>,
+the session data for <i>s</i> will still be available.
+In other words, sessions are guaranteed not to time out prematurely.
+The system does not need to enforce the converse guarantee that sessions time out as early as possible.
+That is, if a client issues a request in session <i>s</i>,
+then waits for an interval greater than <code>SESSION_TIMEOUT_SECS</code>
+and then issues another request in session <i>s</i>,
+the session data <i>may or may not</i> still be available.
+</p><p>
+Assuming the server clocks are approximately synchronized,
+this “one-sided” guarantee is easy to achieve.
+There are two interesting values.
+One is the MaxAge of the session
+cookie that will be returned to the client.
+The other is the timestamp on the session’s entry in the SessTbls
+(which is effectively the session <i>discard_time</i>
+passed in the SessionWrite call described in Section 3.4 above).
+</p><p>
+The MaxAge parameter on the session cookie can just be
+<code>SESSION_TIMEOUT_SECS</code>
+to ensure that the client does not discard the cookie prematurely.
+</p><blockquote>
+Sadly, Versions 8 and earlier of Internet Explorer
+support the (obsolete) “expiration time” cookie parameter but not
+the MaxAge parameter.
+Ii is okay if you ignore this problem and just use a modern browser.
+</blockquote>
+The discard_time passed in the SessionWrite call
+(which is the expiration timestamp stored in each SessTbl) 
+should be at least
+<blockquote>
+discard_time &nbsp; &nbsp; = &nbsp; &nbsp; <code>now</code> &nbsp; + &nbsp; <code>SESSION_TIMEOUT_SECS</code> &nbsp; + &nbsp; &#916;
+</blockquote>
+where <code>now</code> denotes the system clock value at the server making the SessionWrite call,
+and &#916; is a constant to account for the
+maximum allowable difference between any pair of server clocks
+plus the maximum allowable clock drift over a session timeout interval
+plus the communication and processing time
+associated with the SessionWrite calls.
+All replicas of a given version of a given session’s state
+should be given the same discard_time.
+<p>
+A server <i>may not</i> garbage collect a session from a SessTbl before its discard_time has arrived,
+and it <i>should</i> garbage collect the session as soon after that time as is convenient.
+</p><p>
+Choosing a large values for &#916; wastes
+some server memory but is otherwise benign.
+Choosing an aggressively small value helps you to test your session timeout implementation.
+
+</p><h4>3.7 Garbage Collection</h4>
+<p>
+Just as in Project 1a,
+you can do garbage collection with a thread that periodically wakes up
+and scans the local SessTbl looking for session data objects whose discard_time is past.
+As we mentioned in Section 3.4,
+you can reduce the expected load on the garbage collector
+by preferentially storing each new version of a session’s data
+at one of the servers that held the previous version -- 
+the new version overwrites the previous version and thus the
+previous version never needs to be garbage collected.
+To make this possible, the SessTbl should be keyed by SessID only,
+not &lt;SessID, version&gt;.
+
+</p><h4>3.8 Implementing Group Membership</h4>
+<p>
+<b>Basic View Rules.</b>
+In a couple of places in the protocol, a server chooses another server at random.
+To make this possible, each server maintains a membership “View,”
+a set containing the SvrIDs of some servers it “believes” are up.
+To help maintain the View,
+each server follows some simple rules.
+</p><ul>
+<li>
+A SvrID is inserted into the View
+whenever an RPC request or reply message is received directly from that SvrID.
+This can be implemented at a very low level, since the Java DatagramPacket class
+has methods that return the sender’s IP and port.
+<p>
+</p></li><li>
+A SvrID is removed from the View whenever an RPC sent to that SvrID times out.
+</li></ul>
+<p>
+As we discussed in lecture, this basic view maintenance protocol is too conservative:
+it adds a server to the View
+only when there is direct evidence that it is running,
+and deletes a server from the View
+only when there is direct evidence that it has failed.
+In particular, using only this protocol, a network partition will persist forever.
+</p><p>
+So, <i>in addition to</i> the above rules,
+we will use a gossip protocol to maintain server Views,
+as well as to maintain a “bootstrap view”
+at a well-known location in the Amazon SimpleDB.
+</p><p>
+<b>Basic Gossip Protocol.</b>
+Like the protocol in the
+<a href="http://dl.acm.org/citation.cfm?id=945507">Lightweight Probabilistic Broadcast</a> paper discussed in lecture,
+rather than trying to keep track of the entire server set,
+we pick a nominal “view size,” ViewSz,
+and each server attempts to maintain a View containing ViewSz SvrIDs
+chosen at random from all the active SvrIDs.
+Your choice of ViewSz must be big enough to guarantee your desired degree of resilience,
+and in addition, as discussed in the paper, should be &#937;(log N) to maintain
+connectivity of the entire group.
+</p><blockquote><b>Suggestion:</b> ViewSz = 5</blockquote>
+A View is essentially just a set of SvrIDs;
+but to be more precise,
+here is a list of operations your code might need to perform on views:
+<ul>
+<li>
+shrink(View v, int k)
+<br>
+&nbsp; &nbsp; while v contains more than k entries, delete an entry chosen uniformly at random.
+</li><li>
+insert(View v, SvrID s)
+<br>
+&nbsp; &nbsp; insert s into v if not already present
+</li><li>
+remove(View v, SvrID s)
+<br>
+&nbsp; &nbsp; remove s into v if it is present
+</li><li>
+SvrID s = choose(View v)
+<br>
+&nbsp; &nbsp; return s chosen uniformly at random from v
+</li><li>
+union(View v, View w)
+<br>
+&nbsp; &nbsp; set v to the union of v and w (eliminating duplicates)
+</li></ul>
+With these primitives, the basic gossip protocol can be described fairly simply.
+Each server <i>s</i> periodically chooses a server <i>t</i> at random from its View
+and sends an RPC call
+<blockquote>GetView()</blockquote>
+to <i>t</i>.
+A successful reply will return t.View, the current View of <i>t</i>,
+which can be stored into a local variable temp.
+Now <i>s</i> can merge this into its own View by executing
+<blockquote>
+union(temp, s.View)
+<br>
+remove(temp, s)
+<br>
+shrink(temp, ViewSz)
+<br>
+s.View = temp
+</blockquote>
+That is, <i>s</i> replaces its own View with a new View of the desired size chosen
+at random from the set of all SvrIDs known to either <i>s</i> or <i>t</i>.
+<p>
+<b>Bootstrap View.</b>
+What we have described so far is a simple “pull” style gossip protocol.
+As we discussed in lecture, it needs some enhancement
+to bootstrap newly created servers and to handle network partitions.
+</p><p>
+When a server first boots,
+it can’t participate in the basic gossip protocol
+since the only SvrID it knows about is itself.
+One solution, mentioned in lecture,
+is to have a crash-recover or even crash-only node at a well-known address
+taking part in the gossip protocol.
+Call this node the “Bootstrap View server.”
+Assume it is rebooted, possibly with an empty or incorrrect View, after any crash,
+and thus is eventually accessible to any correct server.
+You can implement this behavior using a well-known SimpleDB
+table name (or “Domain” in the terminology of SimpleDB),
+and storing a list of up to ViewSz SvrIDs there.
+As with cookies, you can encode the list as a String of IP addresses
+separated by ‘_’ characters.
+You can initialize the Bootstrap View manually,
+for example by using the
+<a href="https://aws.amazon.com/code/JavaScript/1137">SimpleDB Scratchpad</a>
+to store an empty string or possibly SvrID<sub>NULL</sub>, “0.0.0.0”.
+(The SimpleDB Scratchpad seems to work in Firefox but not in Chrome, Safari
+or IE.)
+Your servers can then read and update the Bootstrap View using the operations
+described <a href="http://docs.aws.amazon.com/AWSJavaSDK/latest/javadoc/index.html">here</a>.
+</p><p>
+Recall, in the basic gossip protocol, each server occasionally reads the View
+of another server (chosen at random from its own View), and then replaces
+its own View with a random combination of the two Views.
+Now that we have added the Bootstrap View in SimpleDB,
+each server must occasionally read and update it
+by a procedure like the following:
+</p><p>
+</p><blockquote>
+View temp = ... (read Bootstrap View from SimpleDB) ...
+<br>
+remove(temp, self)
+<br>
+union(temp. self.View)
+<br>
+shrink(temp, ViewSz)
+<br>
+self.View = copy(temp)
+<br>
+insert(temp, self)
+<br>
+shrink(temp, ViewSz)
+<br>
+... (write temp to Bootstrap View in SimpleDB) ...
+</blockquote>
+Using this scheme, even if the Bootstrap View is empty or completely incorrect,
+it will not remain so for long, but will (in the absence of further failures)
+eventually converge to a subset of the correct SvrIDs.
+Also, you might think you need some synchronization around concurrent SimpleDB accesses
+made by multiple servers,
+e.g. use of the “compare-and-swap” functionality provided by SimpleDB.
+But a little though should convince you it is sufficient to guarantee
+that concurrent client reads and writes should not get corrupted,
+and this is guaranteed by the “eventual consistency” SLA of SimpleDB.
+<p>
+A weakness of the scheme is that scalability is limited because the SimpleDB Bootstrap View
+caan become a “hot spot” --
+if the number of servers is very large,
+the traffic at SimpleDB may grow unacceptably.
+There are techniques to adaptively change the interval between a server’s updates
+to SimpleDB,
+but I’m not asking you to worry about this problem.
+Just
+choose a sufficiently large interval between Bootstrap View updates
+so that even with a relatively large number of servers (10?)
+the expected interval between SimpleDB accesses is at least a few seconds.
+</p><p>
+<b>Avoiding Convoys.</b>
+Consider two servers <i>s</i> and <i>t</i>
+choosing to gossip with server <i>u</i> nearly simultaneously.
+The single-threaded RPC server implementation described in Section 3.2.2 above
+processes calls one at a time; thus, the first call arriving at <i>u</i>
+starts being processed immediately, while the other call waits until the first call
+is done.
+Effectively, <i>s</i> and <i>t</i> are now running in lock step,
+with (say) <i>t</i> running one RPC time behind <i>s</i>.
+After the system has been running for a while,
+it tends to evolve toward a state in which all the servers
+participating in the gossip protocol form a <i>convoy</i> --
+there are bursts of synchronized activity,
+followed by long idle periods.
+</p><p>
+It is easy to avoid this behavior.
+Instead of a loop of the form:
+</p><pre>  while(true) {
+    ... gossip with another site chosen at random ...
+    sleep( GOSSIP_SECS )
+  }
+</pre>
+that uses a fixed sleep time, you should instead write a loop that generates
+a random sleep time with the desired mean:
+<pre>  Random generator = new Random()
+    ...
+  while(true) {
+    ... gossip with another site chosen at random ...
+    sleep( (GOSSIP_SECS/2) + generator.nextInt( GOSSIP_SECS ) )
+  }
+</pre>
+Now the sleep time is chosen uniformly at random between GOSSIP_SECS/2
+and 3*GOSSIP_SECS/2.
+
+<h4>3.9 Summary of RPCs</h4>
+<p>
+Here is a summary of the RPCs that have been described above.
+</p><ul>
+<li>
+SessionRead( SessID, version )
+<br>&nbsp;<br>
+SessID is a session ID, version is the version number of the requested session.
+The reply should be a pair
+<blockquote>&lt; found_version, data &gt;</blockquote>
+comprising the stored session data and the version found on the server.
+If no version of the requested session is found,
+there should be an explicit “not found” response
+(rather than just failing to respond).
+For example, you could return an impossible version number like (-1). 
+<br>&nbsp;<br>
+</li><li>
+SessionWrite( SessID, version, data, discard_time )
+<br>&nbsp;<br>
+SessID is a session ID, version is the version number of the session to be stored,
+data is the session data to be stored, and discard_time is the time after which
+the stored session may be garbage collected.
+The reply is just an acknowledgement.
+The effect is to store the new session data into the SessTbl at the server.
+If the server already holds an older instance of that session,
+it may (should?) be garbage collected immediately.
+<br>&nbsp;<br>
+</li><li>
+GetView( )
+<br>&nbsp;<br>
+There are no arguments.
+The reply is the View of the called server,
+containing at most ViewSz (and possibly fewer) members.
+<br>&nbsp;<br>
+</li></ul>
+<p>
+All these procedures should work properly with the basic View rules
+of Section 3.8.
+That is, whenever any RPC message (call or reply) is received,
+its sender should be added to the View if not already present;
+and when an RPC call times out, the destination should be removed
+from the View.
+
+</p><h3>4. Your Site’s User Interface</h3>
+<p>
+To help with grading (and debugging) of your site,
+you should extend the user interface 
+to report data about server execution.
+Add the following displayed information:
+</p><ul>
+<li>
+The SverID of the server executing the client request.
+</li><li>
+For a request in an existing session, report where the session data was found
+(SvrID<sub>primary</sub> or SvrID<sub>backup</sub>).
+</li><li>
+The SvrID<sub>primary</sub>, SvrID<sub>backup</sub>, session expiration time
+and discard_time for a new or updated session.
+</li><li>
+The server’s entire View.
+</li></ul>
+
+<h3>5. k-Resiliency (optional)</h3>
+<p>
+<b>This part is mandatory for groups of 4 persons.</b>
+</p><p>
+The protocol as described above yields a scalable 1-resilient distributed service.
+For up to 15 points of extra credit,
+make your service <i>k</i>-resilient,
+where the value of <i>k</i> is a compile-time parameter that may be greater than 1.
+Note the system cannot possibly be <i>k</i>-resilient unless there are at least (<i>k</i>+1) live servers.
+Thus, your system will be <i>k</i>-resilient only for sessions created after the
+<i>k</i>+1<sup>st</sup> server is booted.
+This is true even when <i>k</i> is 1.
+
+</p><h3>6. Suggestions on how to proceed</h3>
+<b>(a)</b>
+Instructions <a href="http://docs.aws.amazon.com/elasticbeanstalk/latest/dg/create_deploy_Java.html">here</a>
+describe how to create an Eclipse AWS Java Web Project
+that can be either tested locally or deployed to AWS using ElasticBeanstalk.
+Make sure you are comfortable with this procedure.
+<p>
+<b>(b)</b>
+UDP based RPC client and server implementations can be tested in any Java Virtual Machine --
+it doesn’t need to be an Apache Tomcat instance (though of course it can be).
+Your RPC client and server code can be fully tested running as separate threads in the same JVM instance,
+initially using localhost (127.0.0.1) for the IP address.
+This will let you get comfortable with essential details like
+packing and unpacking arguments/results in the <code>DatagramPacket</code> objects,
+and handling timeouts properly.
+</p><p>
+<b>(c)</b>
+A single instance of your application server
+should be runnable in a Tomcat instance on your local machine.
+You can even access SimpleDB and other AWS services
+from your local machine using the same AWS SDK calls you would use
+in code running on an EC2 instance.
+Thus, the group membership protocol from Section 3.8
+will work, though of course the View will not grow bigger than a single server.
+</p><p>
+You can also send HTTP requests directly to such a server instance.
+Of course, a single server will not be 1-resilient,
+but it should run correctly.
+</p><p>
+Using two or more of your group members’ machines,
+you can run multiple copies of your server
+and they should be able to locate each other using the Bootstrap View in SimpleDB.
+This will require using “real” IP addresses, not localhost.
+</p><p>
+<b>(d)</b>
+At this point you should be ready to deploy
+a 1-resilient multi-server
+website running on the Amazon Cloud using Elastic Beanstalk.
+The major remaining issue is to make sure the EC2 instances
+in your Elastic Beanstalk auto-scaling group are able to communicate with one another.
+You will probably need to add some rules to your security group to allow incoming
+UDP packets sent to any port.
+This can be done using the
+<a href="https://console.aws.amazon.com/s3/home">AWS Management Console</a>.
+
+</p><h3>7. Submit Your Work</h3>
+<p>Create a file, in <code>zip</code> archive format,
+named <code>solution.zip</code>
+This archive should contain
+</p><ul>
+<li>a <code>README</code> file.
+<br>
+This may be in <code>.pdf</code> or <code>.txt</code> or <code>.doc</code>
+format.
+This file should include anything we need to know to grade your assignment.
+In particular, it should briefly describe the overall structure of your solution,
+including formats of your cookies and RPC messages;
+and specify what functionality is implemented in each source file.
+It should also include your Elastic Beanstalk setup procedure.
+<p>
+If you implemented the extra credit option, describe
+the changes you needed to make..
+</p></li><li>your Java and JSP source code.
+<br>
+Include understandable high-level comments.
+<br>
+Please include the source code directory structure here!
+In the past, some students have submitted their <code>*.java</code> and <code>*.jsp</code> files
+in a single flat folder.
+Please don’t do this, as it makes it difficult for us to import the files
+into Eclipse.
+It is sufficient for you just to include the sources in your <code>.war</code> file
+(see below).
+</li><li>a deployable <code>.war</code> file for your system.
+</li></ul>
+<p>
+If you wish, you may include additional files in the archive as well,
+for example, screenshots.
+Submit your <code>solution.zip</code> file using CMS by the specified deadline.
+
+<!-- END PAGE CONTENT -->
+</p></td>
+</tr>
+</tbody></table>
+
+
+</body></html>
