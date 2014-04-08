@@ -1,1 +1,6 @@
-hh
+3.1
+
+serverID  == IP address
+
+
+how to get your machine’s IP address from Java
